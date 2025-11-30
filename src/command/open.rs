@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 
 pub fn run(branch_name: &str, run_hooks: bool, force_files: bool) -> Result<()> {
     let config = config::Config::load(None)?;
-    let context = WorkflowContext::new(config)?;
+    let context = WorkflowContext::new(config, None)?;
 
     // Construct setup options (pane commands always run on open)
     let options = SetupOptions::new(run_hooks, force_files, true);

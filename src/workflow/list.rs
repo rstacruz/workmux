@@ -1,11 +1,11 @@
 use anyhow::{Result, anyhow};
 
-use crate::{config, git, tmux};
+use crate::{config, git, multiplexer};
 
 use super::types::WorktreeInfo;
 
 /// List all worktrees with their status
-pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
+pub fn list(config: &config::Config, cli_multiplexer: Option<&str>) -> Result<Vec<WorktreeInfo>> {
     if !git::is_git_repo()? {
         return Err(anyhow!("Not in a git repository"));
     }
@@ -16,9 +16,12 @@ pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
         return Ok(Vec::new());
     }
 
-    // Check tmux status and get all windows once to avoid repeated process calls
-    let tmux_windows: std::collections::HashSet<String> = if tmux::is_running().unwrap_or(false) {
-        tmux::get_all_window_names().unwrap_or_default()
+    // Get the multiplexer instance
+    let mux = multiplexer::get_multiplexer(config, cli_multiplexer)?;
+
+    // Check multiplexer status and get all windows once to avoid repeated process calls
+    let mux_windows: std::collections::HashSet<String> = if mux.is_running().unwrap_or(false) {
+        mux.get_all_tab_names().unwrap_or_default()
     } else {
         std::collections::HashSet::new()
     };
@@ -45,9 +48,9 @@ pub fn list(config: &config::Config) -> Result<Vec<WorktreeInfo>> {
                 .unwrap_or(&branch)
                 .to_string();
 
-            // Use handle for tmux window check, not branch name
-            let prefixed_window_name = tmux::prefixed(prefix, &handle);
-            let has_tmux = tmux_windows.contains(&prefixed_window_name);
+            // Use handle for multiplexer window check, not branch name
+            let prefixed_window_name = mux.prefixed(prefix, &handle);
+            let has_tmux = mux_windows.contains(&prefixed_window_name);
 
             // Check for unmerged commits, but only if this isn't the main branch
             let has_unmerged = if let Some(ref main) = main_branch {

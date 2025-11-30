@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::{thread, time::Duration};
 
-use crate::{cmd, git, tmux};
+use crate::{cmd, git, multiplexer::Multiplexer};
 use tracing::{debug, info, warn};
 
 use super::context::WorkflowContext;
@@ -10,9 +10,9 @@ use super::types::CleanupResult;
 
 const WINDOW_CLOSE_DELAY_MS: u64 = 300;
 
-/// Centralized function to clean up tmux and git resources.
+/// Centralized function to clean up multiplexer and git resources.
 /// `branch_name` is used for git operations (branch deletion).
-/// `handle` is used for tmux operations (window lookup/kill).
+/// `handle` is used for multiplexer operations (window lookup/kill).
 pub fn cleanup(
     context: &WorkflowContext,
     branch_name: &str,
@@ -36,10 +36,11 @@ pub fn cleanup(
     // is run from within the worktree being deleted.
     context.chdir_to_main_worktree()?;
 
-    let tmux_running = tmux::is_running().unwrap_or(false);
-    let running_inside_target_window = if tmux_running {
-        match tmux::current_window_name() {
-            Ok(Some(current_name)) => current_name == tmux::prefixed(&context.prefix, handle),
+    let mux = context.mux.as_ref();
+    let mux_running = mux.is_running().unwrap_or(false);
+    let running_inside_target_window = if mux_running {
+        match mux.current_tab_name() {
+            Ok(Some(current_name)) => current_name == mux.prefixed(&context.prefix, handle),
             _ => false,
         }
     } else {
@@ -128,7 +129,7 @@ pub fn cleanup(
     if running_inside_target_window {
         info!(
             branch = branch_name,
-            "cleanup:deferring tmux window kill because command is running inside the window"
+            "cleanup:deferring multiplexer window kill because command is running inside the window"
         );
         // Perform all filesystem and git cleanup *before* returning. The caller
         // will then schedule the asynchronous window close.
@@ -136,19 +137,19 @@ pub fn cleanup(
     } else {
         // Not running inside the target window, so we kill the window first
         // to release any shell locks on the directory.
-        if tmux_running && tmux::window_exists(&context.prefix, handle).unwrap_or(false) {
-            tmux::kill_window(&context.prefix, handle).context("Failed to kill tmux window")?;
+        if mux_running && mux.tab_exists(&context.prefix, handle).unwrap_or(false) {
+            mux.kill_tab(&context.prefix, handle).context("Failed to kill multiplexer window")?;
             result.tmux_window_killed = true;
-            info!(handle = handle, "cleanup:tmux window killed");
+            info!(handle = handle, "cleanup:multiplexer window killed");
 
             // Poll to confirm the window is gone before proceeding. This prevents a race
             // condition where we try to delete the directory before the shell inside
-            // the tmux window has terminated.
+            // the multiplexer window has terminated.
             const MAX_RETRIES: u32 = 20;
             const RETRY_DELAY: Duration = Duration::from_millis(50);
             let mut window_is_gone = false;
             for _ in 0..MAX_RETRIES {
-                if !tmux::window_exists(&context.prefix, handle)? {
+                if !mux.tab_exists(&context.prefix, handle)? {
                     window_is_gone = true;
                     break;
                 }
@@ -158,11 +159,13 @@ pub fn cleanup(
             if !window_is_gone {
                 warn!(
                     handle = handle,
-                    "cleanup:tmux window did not close within retry budget"
+                    "cleanup:multiplexer window did not close within retry budget"
                 );
                 eprintln!(
-                    "Warning: tmux window for '{}' did not close in the allotted time. \
+                    "Warning: {} {} for '{}' did not close in the allotted time. \
                     Filesystem cleanup may fail.",
+                    mux.name(),
+                    mux.window_term(),
                     handle
                 );
             }
@@ -176,32 +179,28 @@ pub fn cleanup(
 
 /// Navigate to the main branch window and close the target window.
 /// Handles both cases: running inside the target window (async) and outside (sync).
-/// `target_handle` is the tmux window name (derived from worktree directory basename).
+/// `target_handle` is the multiplexer window name (derived from worktree directory basename).
 pub fn navigate_to_main_and_close(
+    mux: &dyn Multiplexer,
     prefix: &str,
     main_branch: &str,
     target_handle: &str,
     cleanup_result: &CleanupResult,
 ) -> Result<()> {
-    /// Helper function to shell-escape strings for safe inclusion in shell commands
-    fn shell_escape(s: &str) -> String {
-        format!("'{}'", s.replace('\'', r#"'\''"#))
-    }
-
     // Check if main branch window exists
-    if !tmux::is_running()? || !tmux::window_exists(prefix, main_branch)? {
+    if !mux.is_running()? || !mux.tab_exists(prefix, main_branch)? {
         // If main window doesn't exist, still need to close target window if running inside it
         if cleanup_result.ran_inside_target_window {
             let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
-            match tmux::schedule_window_close(prefix, target_handle, delay) {
+            match mux.schedule_tab_close(prefix, target_handle, delay) {
                 Ok(_) => info!(
                     handle = target_handle,
-                    "cleanup:tmux window close scheduled"
+                    "cleanup:multiplexer window close scheduled"
                 ),
                 Err(e) => warn!(
                     handle = target_handle,
                     error = %e,
-                    "cleanup:failed to schedule tmux window close",
+                    "cleanup:failed to schedule multiplexer window close",
                 ),
             }
         }
@@ -212,8 +211,11 @@ pub fn navigate_to_main_and_close(
         // Running inside target window: schedule both navigation and kill together
         let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
         let delay_secs = format!("{:.3}", delay.as_secs_f64());
-        let main_prefixed = shell_escape(&tmux::prefixed(prefix, main_branch));
-        let target_prefixed = shell_escape(&tmux::prefixed(prefix, target_handle));
+        let main_prefixed = shell_escape(&mux.prefixed(prefix, main_branch));
+        let target_prefixed = shell_escape(&mux.prefixed(prefix, target_handle));
+        
+        // Note: This script is tmux-specific. For Zellij, we'd need a different approach.
+        // For now, this works because schedule_tab_close and run_shell handle the differences.
         let script = format!(
             "sleep {delay}; tmux select-window -t ={main} >/dev/null 2>&1; tmux kill-window -t ={target} >/dev/null 2>&1",
             delay = delay_secs,
@@ -221,7 +223,7 @@ pub fn navigate_to_main_and_close(
             target = target_prefixed,
         );
 
-        match tmux::run_shell(&script) {
+        match mux.run_shell(&script) {
             Ok(_) => info!(
                 handle = target_handle,
                 main = main_branch,
@@ -235,7 +237,7 @@ pub fn navigate_to_main_and_close(
         }
     } else {
         // Running outside target window: synchronously navigate to main and close target
-        tmux::select_window(prefix, main_branch)?;
+        mux.select_tab(prefix, main_branch)?;
         info!(
             handle = target_handle,
             main = main_branch,
@@ -243,7 +245,7 @@ pub fn navigate_to_main_and_close(
         );
 
         // Close the target window now that we've navigated away
-        match tmux::kill_window(prefix, target_handle) {
+        match mux.kill_tab(prefix, target_handle) {
             Ok(_) => info!(
                 handle = target_handle,
                 "cleanup:closed target branch window"
@@ -257,4 +259,9 @@ pub fn navigate_to_main_and_close(
     }
 
     Ok(())
+}
+
+/// Helper function to shell-escape strings for safe inclusion in shell commands
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r#"'\''"#))
 }

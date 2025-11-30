@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{cmd, config, git, prompt::Prompt, tmux};
+use crate::{cmd, config, git, multiplexer::{Multiplexer, PaneSetupOptions}, prompt::Prompt};
 use tracing::{debug, info, trace};
 
 use fs_extra::dir as fs_dir;
@@ -10,16 +10,17 @@ use fs_extra::file as fs_file;
 
 use super::types::CreateResult;
 
-/// Sets up the tmux window, files, and hooks for a worktree.
+/// Sets up the multiplexer window, files, and hooks for a worktree.
 /// This is the shared logic between `create` and `open`.
 ///
 /// # Arguments
 /// * `branch_name` - The git branch name (for logging/reference)
-/// * `handle` - The display name used for tmux window naming
+/// * `handle` - The display name used for multiplexer window naming
 /// * `worktree_path` - Path to the worktree directory
 /// * `config` - Configuration settings
 /// * `options` - Setup options (hooks, file ops, etc.)
 /// * `agent` - Optional agent override
+/// * `mux` - The multiplexer to use
 pub fn setup_environment(
     branch_name: &str,
     handle: &str,
@@ -27,6 +28,7 @@ pub fn setup_environment(
     config: &config::Config,
     options: &super::types::SetupOptions,
     agent: Option<&str>,
+    mux: &dyn Multiplexer,
 ) -> Result<CreateResult> {
     debug!(
         branch = branch_name,
@@ -71,30 +73,31 @@ pub fn setup_environment(
         );
     }
 
-    // Create tmux window and get the initial pane's ID
+    // Create multiplexer window and get the initial pane's ID
     // Use handle for the window name (not branch_name)
-    let initial_pane_id = tmux::create_window(
+    let initial_pane_id = mux.create_tab(
         prefix,
         handle,
         worktree_path,
         /* detached: */ !options.focus_window,
     )
-    .context("Failed to create tmux window")?;
+    .context("Failed to create multiplexer window")?;
     info!(
         branch = branch_name,
         handle = handle,
         pane_id = %initial_pane_id,
-        "setup_environment:tmux window created"
+        multiplexer = mux.name(),
+        "setup_environment:multiplexer window created"
     );
 
     // Setup panes
     let panes = config.panes.as_deref().unwrap_or(&[]);
     let resolved_panes = resolve_pane_configuration(panes, agent);
-    let pane_setup_result = tmux::setup_panes(
+    let pane_setup_result = mux.setup_panes(
         &initial_pane_id,
         &resolved_panes,
         worktree_path,
-        tmux::PaneSetupOptions {
+        PaneSetupOptions {
             run_commands: options.run_pane_commands,
             prompt_file_path: options.prompt_file_path.as_deref(),
         },
@@ -110,12 +113,12 @@ pub fn setup_environment(
 
     // Focus the configured pane and optionally switch to the window
     if options.focus_window {
-        tmux::select_pane(&pane_setup_result.focus_pane_id)?;
+        mux.select_pane(&pane_setup_result.focus_pane_id)?;
         // Use handle for window selection (not branch_name)
-        tmux::select_window(prefix, handle)?;
+        mux.select_tab(prefix, handle)?;
     } else {
         // Background mode: do not steal focus from the current window.
-        // We intentionally skip select_window to keep the user's current window.
+        // We intentionally skip select_tab to keep the user's current window.
     }
 
     Ok(CreateResult {

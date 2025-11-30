@@ -176,6 +176,7 @@ pub fn merge(
 
     // Navigate to the main branch window and close the target window
     cleanup::navigate_to_main_and_close(
+        context.mux.as_ref(),
         &context.prefix,
         &context.main_branch,
         handle,

@@ -20,7 +20,7 @@ struct WorktreeRow {
 
 pub fn run() -> Result<()> {
     let config = config::Config::load(None)?;
-    let worktrees = workflow::list(&config)?;
+    let worktrees = workflow::list(&config, None)?;
 
     if worktrees.is_empty() {
         println!("No worktrees found");

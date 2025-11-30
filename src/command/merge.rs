@@ -29,7 +29,7 @@ pub fn run(
     // Note: Must be done BEFORE creating WorkflowContext (which may change CWD)
     let branch_to_merge = super::resolve_branch(branch_name, "merge")?;
 
-    let context = WorkflowContext::new(config)?;
+    let context = WorkflowContext::new(config, None)?;
 
     // Only announce pre-delete hooks if we're actually going to run cleanup
     if !keep {

@@ -72,7 +72,7 @@ pub fn run(
     // Handle rescue flow early if requested
     if rescue.with_changes {
         let rescue_config = config::Config::load(multi.agent.first().map(|s| s.as_str()))?;
-        let rescue_context = workflow::WorkflowContext::new(rescue_config)?;
+        let rescue_context = workflow::WorkflowContext::new(rescue_config, None)?;
         // Derive handle for rescue flow (uses config for naming strategy/prefix)
         let handle =
             crate::naming::derive_handle(branch_name, name.as_deref(), &rescue_context.config)?;
@@ -386,7 +386,7 @@ fn create_worktrees_from_specs(
         super::announce_hooks(&config, Some(&options), super::HookPhase::PostCreate);
 
         // Create a WorkflowContext for this spec's config
-        let context = workflow::WorkflowContext::new(config)?;
+        let context = workflow::WorkflowContext::new(config, None)?;
 
         let result = workflow::create(
             &spec.branch_name,

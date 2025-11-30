@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
-use crate::{git, prompt::Prompt, tmux};
+use crate::{git, prompt::Prompt};
 use tracing::{debug, info, warn};
 
 use super::cleanup;
@@ -45,12 +45,14 @@ pub fn create(
     }
 
     // Pre-flight checks
-    context.ensure_tmux_running()?;
+    context.ensure_multiplexer_running()?;
 
-    // Check tmux window using handle (the display name)
-    if tmux::window_exists(&context.prefix, handle)? {
+    // Check multiplexer window using handle (the display name)
+    if context.mux.tab_exists(&context.prefix, handle)? {
         return Err(anyhow!(
-            "A tmux window named '{}{}' already exists",
+            "A {} {} named '{}{}' already exists",
+            context.mux.name(),
+            context.mux.window_term(),
             context.prefix,
             handle
         ));
@@ -214,6 +216,7 @@ pub fn create(
         &context.config,
         &options_with_prompt,
         agent,
+        context.mux.as_ref(),
     )?;
     result.base_branch = base_branch_for_creation.clone();
     info!(
@@ -328,6 +331,7 @@ pub fn create_with_changes(
 
             // Handle tmux window navigation/closing based on whether we're inside the target window
             cleanup::navigate_to_main_and_close(
+                context.mux.as_ref(),
                 &context.prefix,
                 &context.main_branch,
                 handle,

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 
-use crate::{config, git, tmux};
+use crate::{config, git, multiplexer::{self, Multiplexer}};
 use tracing::debug;
 
 /// Shared context for workflow operations
@@ -13,15 +13,16 @@ pub struct WorkflowContext {
     pub main_branch: String,
     pub prefix: String,
     pub config: config::Config,
+    pub mux: Box<dyn Multiplexer>,
 }
 
 impl WorkflowContext {
     /// Create a new workflow context
     ///
     /// Performs the git repository check and gathers all commonly needed data.
-    /// Does NOT check if tmux is running or change the current directory - those
+    /// Does NOT check if the multiplexer is running or change the current directory - those
     /// are optional operations that can be performed via helper methods.
-    pub fn new(config: config::Config) -> Result<Self> {
+    pub fn new(config: config::Config, cli_multiplexer: Option<&str>) -> Result<Self> {
         if !git::is_git_repo()? {
             return Err(anyhow!("Not in a git repository"));
         }
@@ -38,10 +39,14 @@ impl WorkflowContext {
 
         let prefix = config.window_prefix().to_string();
 
+        // Get the appropriate multiplexer based on config and CLI override
+        let mux = multiplexer::get_multiplexer(&config, cli_multiplexer)?;
+
         debug!(
             main_worktree_root = %main_worktree_root.display(),
             main_branch = %main_branch,
             prefix = %prefix,
+            multiplexer = %mux.name(),
             "workflow_context:created"
         );
 
@@ -50,16 +55,19 @@ impl WorkflowContext {
             main_branch,
             prefix,
             config,
+            mux,
         })
     }
 
-    /// Ensure tmux is running, returning an error if not
+    /// Ensure multiplexer is running, returning an error if not
     ///
-    /// Call this at the start of workflows that require tmux.
-    pub fn ensure_tmux_running(&self) -> Result<()> {
-        if !tmux::is_running()? {
+    /// Call this at the start of workflows that require a multiplexer.
+    pub fn ensure_multiplexer_running(&self) -> Result<()> {
+        if !self.mux.is_running()? {
             return Err(anyhow!(
-                "tmux is not running. Please start a tmux session first."
+                "{} is not running. Please start a {} session first.",
+                self.mux.name(),
+                self.mux.name()
             ));
         }
         Ok(())

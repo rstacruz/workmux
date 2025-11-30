@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 
-use crate::{git, tmux};
+use crate::git;
 use tracing::info;
 
 use super::context::WorkflowContext;
@@ -26,7 +26,7 @@ pub fn open(
     }
 
     // Pre-flight checks
-    context.ensure_tmux_running()?;
+    context.ensure_multiplexer_running()?;
 
     // This command requires the worktree to already exist
     let worktree_path = git::get_worktree_path(branch_name).with_context(|| {
@@ -44,13 +44,17 @@ pub fn open(
         .to_string_lossy()
         .to_string();
 
-    // Check if tmux window exists using handle (the directory name)
-    if tmux::window_exists(&context.prefix, &handle)? {
+    // Check if multiplexer window exists using handle (the directory name)
+    if context.mux.tab_exists(&context.prefix, &handle)? {
         return Err(anyhow!(
-            "A tmux window named '{}{}' already exists. To switch to it, run: tmux select-window -t '{}'",
+            "A {} {} named '{}{}' already exists. To switch to it, run: {} select-{} -t '{}'",
+            context.mux.name(),
+            context.mux.window_term(),
             context.prefix,
             handle,
-            tmux::prefixed(&context.prefix, &handle)
+            context.mux.name(),
+            context.mux.window_term(),
+            context.mux.prefixed(&context.prefix, &handle)
         ));
     }
 
@@ -62,6 +66,7 @@ pub fn open(
         &context.config,
         &options,
         None,
+        context.mux.as_ref(),
     )?;
     info!(
         branch = branch_name,

@@ -27,7 +27,7 @@ pub fn run(
         };
 
     let config = config::Config::load(None)?;
-    let context = WorkflowContext::new(config)?;
+    let context = WorkflowContext::new(config, None)?;
 
     super::announce_hooks(&context.config, None, super::HookPhase::PreDelete);
 

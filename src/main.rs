@@ -6,10 +6,10 @@ mod config;
 mod git;
 mod github;
 mod logger;
+mod multiplexer;
 mod naming;
 mod prompt;
 mod template;
-mod tmux;
 mod workflow;
 
 use anyhow::Result;

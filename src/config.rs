@@ -94,6 +94,10 @@ pub struct Config {
     /// File operations to perform after creating the worktree
     #[serde(default)]
     pub files: FileConfig,
+
+    /// Terminal multiplexer to use: "auto", "tmux", or "zellij"
+    #[serde(default)]
+    pub multiplexer: Option<String>,
 }
 
 /// Configuration for a single tmux pane
@@ -376,6 +380,9 @@ impl Config {
                 copy: merge_vec_with_placeholder(self.files.copy, project.files.copy),
                 symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
             },
+
+            // Multiplexer: project wins
+            multiplexer: project.multiplexer.or(self.multiplexer),
         }
     }
 
