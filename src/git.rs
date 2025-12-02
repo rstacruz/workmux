@@ -408,6 +408,35 @@ pub fn get_worktree_path(branch_name: &str) -> Result<PathBuf> {
     Err(WorktreeNotFound(branch_name.to_string()).into())
 }
 
+/// Get the path and branch for a worktree by name (branch or directory basename).
+/// Prioritises exact branch match over directory name match.
+pub fn get_worktree_by_name(name: &str) -> Result<(PathBuf, String)> {
+    let list_str = Cmd::new("git")
+        .args(&["worktree", "list", "--porcelain"])
+        .run_and_capture_stdout()
+        .context("Failed to list worktrees while locating worktree")?;
+
+    let worktrees = parse_worktree_list_porcelain(&list_str)?;
+
+    // First pass: exact branch match (highest priority)
+    for (path, branch) in &worktrees {
+        if branch == name {
+            return Ok((path.clone(), branch.clone()));
+        }
+    }
+
+    // Second pass: directory basename match
+    for (path, branch) in &worktrees {
+        if let Some(dir_name) = path.file_name().and_then(|s| s.to_str()) {
+            if dir_name == name {
+                return Ok((path.clone(), branch.clone()));
+            }
+        }
+    }
+
+    Err(WorktreeNotFound(name.to_string()).into())
+}
+
 /// List all worktrees with their branches
 pub fn list_worktrees() -> Result<Vec<(PathBuf, String)>> {
     let list = Cmd::new("git")

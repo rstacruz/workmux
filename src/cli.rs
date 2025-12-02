@@ -26,14 +26,26 @@ impl WorktreeBranchParser {
 
         let main_branch = git::get_default_branch().ok();
 
-        worktrees
-            .into_iter()
-            .map(|(_, branch)| branch)
-            // Filter out the main branch, as it's not a candidate for merging/removing.
-            .filter(|branch| main_branch.as_deref() != Some(branch.as_str()))
-            // Filter out detached HEAD states.
-            .filter(|branch| branch != "(detached)")
-            .collect()
+        // Collect both branch names and directory basenames (handles)
+        let mut names: Vec<String> = Vec::new();
+        for (path, branch) in worktrees {
+            // Skip main branch and detached HEAD
+            if main_branch.as_deref() == Some(branch.as_str()) || branch == "(detached)" {
+                continue;
+            }
+
+            // Add branch name
+            names.push(branch);
+
+            // Add directory basename if different from branch
+            if let Some(dir_name) = path.file_name().and_then(|s| s.to_str()) {
+                if !names.contains(&dir_name.to_string()) {
+                    names.push(dir_name.to_string());
+                }
+            }
+        }
+
+        names
     }
 }
 
@@ -147,9 +159,9 @@ enum Commands {
 
     /// Open a tmux window for an existing worktree
     Open {
-        /// Name of the branch with an existing worktree
+        /// Branch name or worktree directory name
         #[arg(value_parser = WorktreeBranchParser::new())]
-        branch_name: String,
+        name: String,
 
         /// Re-run post-create hooks (e.g., pnpm install)
         #[arg(long)]
@@ -277,10 +289,10 @@ pub fn run() -> Result<()> {
             multi,
         ),
         Commands::Open {
-            branch_name,
+            name,
             run_hooks,
             force_files,
-        } => command::open::run(&branch_name, run_hooks, force_files),
+        } => command::open::run(&name, run_hooks, force_files),
         Commands::Merge {
             branch_name,
             into,
