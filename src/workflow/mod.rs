@@ -5,6 +5,8 @@ mod create;
 mod list;
 mod merge;
 mod open;
+pub mod pr;
+pub mod prompt_loader;
 mod remove;
 mod setup;
 pub mod types;
@@ -18,4 +20,4 @@ pub use remove::remove;
 
 // Re-export commonly used types for convenience
 pub use context::WorkflowContext;
-pub use types::SetupOptions;
+pub use types::{CreateArgs, SetupOptions};

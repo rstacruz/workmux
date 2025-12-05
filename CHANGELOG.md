@@ -1,5 +1,39 @@
 # Changelog
 
+<!-- skipped: v0.1.27 -->
+<!-- skipped: v0.1.25 -->
+<!-- skipped: v0.1.8 -->
+
+## v0.1.36 (2025-12-01)
+
+- Added `--into` flag to `merge` command for merging into branches other than
+  main (e.g., `workmux merge feature --into develop`)
+- Fixed config loading and file operations when running commands from inside a
+  worktree
+- Removed `--delete-remote` flag from `merge` and `remove` commands
+
+## v0.1.35 (2025-12-01)
+
+- Added agent status tracking in tmux window names, showing icons for different
+  Claude Code states (🤖 working, 💬 waiting, ✅ done). The "done" status
+  auto-clears when you focus the window.
+
+## v0.1.34 (2025-11-30)
+
+- Fixed worktree path calculation when running `add` from inside an existing
+  worktree, which previously created nested paths instead of sibling worktrees
+
+## v0.1.33 (2025-11-30)
+
+- Added support for GitHub fork branch format (`user:branch`) in `add` command,
+  allowing direct checkout of fork branches copied from GitHub's UI
+
+## v0.1.32 (2025-11-30)
+
+- Added OpenCode agent support: prompts are now automatically passed using the
+  `-p` flag when using `--prompt-file` or `--prompt-editor` with
+  `--agent opencode`
+
 ## v0.1.31 (2025-11-29)
 
 - Added `path` command to get the filesystem path of a worktree by branch name

@@ -28,6 +28,8 @@ parallel without conflict.
 
 ## Philosophy
 
+- **Native tmux integration**: Workmux creates windows in your current tmux
+  session. Your existing shortcuts, themes, and workflow stay intact.
 - **One worktree, one tmux window**: Each git worktree gets its own dedicated,
   pre-configured tmux window.
 - **Frictionless**: Multi-step workflows are reduced to simple commands.
@@ -50,8 +52,8 @@ agents, is as simple as managing tmux windows.
 - Merge branches and clean up everything (worktree, tmux window, branches) in
   one command (`merge`)
 - List all worktrees with their tmux and merge status
-- Bootstrap projects with an initial configuration file (`init`)
-- Dynamic shell completions for branch names
+- Display Claude agent status in tmux window names → [setup](#agent-status-tracking)
+- Shell completions
 
 ## Hype
 
@@ -217,6 +219,13 @@ For a real-world example, see
 - `merge_strategy`: Default strategy for `workmux merge` (`merge`, `rebase`, or
   `squash`). CLI flags (`--rebase`, `--squash`) always override this setting.
   Default: `merge`.
+- `status_format`: Whether to automatically configure tmux to display agent
+  status icons in the window list. Default: `true`.
+- `status_icons`: Custom icons for agent status display.
+  - `working`: Icon shown when agent is processing (default: `🤖`)
+  - `waiting`: Icon shown when agent needs user input (default: `💬`)
+  - `done`: Icon shown when agent finished (default: `✅`) - auto-clears on
+    window focus
 
 #### Default behavior
 
@@ -268,13 +277,13 @@ alias wm='workmux'
 ## Commands
 
 - [`add`](#workmux-add-branch-name) - Create a new worktree and tmux window
-- [`merge`](#workmux-merge-branch-name) - Merge a branch and clean up everything
+- [`merge`](#workmux-merge-name) - Merge a branch and clean up everything
 - [`remove`](#workmux-remove-branch-name) - Remove a worktree without merging
 - [`list`](#workmux-list) - List all worktrees with status
 - [`init`](#workmux-init) - Generate configuration file
 - [`open`](#workmux-open-branch-name) - Open a tmux window for an existing
   worktree
-- [`path`](#workmux-path-branch-name) - Get the filesystem path of a worktree
+- [`path`](#workmux-path-name) - Get the filesystem path of a worktree
 - [`claude prune`](#workmux-claude-prune) - Clean up stale Claude Code entries
 - [`completions`](#workmux-completions-shell) - Generate shell completions
 
@@ -283,11 +292,10 @@ alias wm='workmux'
 Creates a new git worktree with a matching tmux window and switches you to it
 immediately. If the branch doesn't exist, it will be created automatically.
 
-- `<branch-name>`: Name of the branch to create or switch to, or a remote branch
-  reference (e.g., `origin/feature-branch`). When you provide a remote
-  reference, workmux automatically fetches it and creates a local branch with
-  the name derived from the remote branch (e.g., `origin/feature/foo` creates
-  local branch `feature/foo`). Optional when using `--pr`.
+- `<branch-name>`: Name of the branch to create or switch to, a remote branch
+  reference (e.g., `origin/feature-branch`), or a GitHub fork reference (e.g.,
+  `user:branch`). Remote and fork references are automatically fetched and
+  create a local branch with the derived name. Optional when using `--pr`.
 
 #### Options
 
@@ -377,7 +385,7 @@ workmux add feature/parallel-task --background
 workmux add feature/long-descriptive-branch-name --name short
 ```
 
-##### Checking out pull requests
+##### Checking out pull requests and fork branches
 
 ```bash
 # Checkout PR #123. The local branch will be named after the PR's branch.
@@ -385,6 +393,9 @@ workmux add --pr 123
 
 # Checkout PR #456 with a custom local branch name
 workmux add fix/api-bug --pr 456
+
+# Checkout a fork branch using GitHub's owner:branch format (copy from GitHub UI)
+workmux add someuser:feature-branch
 ```
 
 ##### Moving changes to a new worktree
@@ -567,20 +578,23 @@ workmux add testing --prompt-file task.md
 
 ---
 
-### `workmux merge [branch-name]`
+### `workmux merge [name]`
 
-Merges a branch into the main branch and automatically cleans up all associated
-resources (worktree, tmux window, and local branch).
+Merges a branch into a target branch (main by default) and automatically cleans
+up all associated resources (worktree, tmux window, and local branch).
 
-- `[branch-name]`: Optional name of the branch to merge. If omitted,
-  automatically detects the current branch from the worktree you're in.
+- `[name]`: Optional name of the worktree (can be either the branch name or the
+  worktree directory name). If omitted, automatically detects the current branch
+  from the worktree you're in.
 
 #### Options
 
+- `--into <branch>`: Merge into the specified branch instead of the main branch.
+  Useful for stacked PRs, git-flow workflows, or merging subtasks into a parent
+  feature branch. If the target branch has its own worktree, the merge happens
+  there; otherwise, the main worktree is used.
 - `--ignore-uncommitted`: Commit any staged changes before merging without
   opening an editor
-- `--delete-remote`, `-r`: Also delete the remote branch after a successful
-  merge
 - `--keep`, `-k`: Keep the worktree, window, and branch after merging (skip
   cleanup). Useful when you want to verify the merge before cleaning up.
 
@@ -590,25 +604,26 @@ By default, `workmux merge` performs a standard merge commit (configurable via
 `merge_strategy`). You can override the configured behavior with these mutually
 exclusive flags:
 
-- `--rebase`: Rebase the feature branch onto main before merging (creates a
-  linear history via fast-forward merge). If conflicts occur, you'll need to
+- `--rebase`: Rebase the feature branch onto the target before merging (creates
+  a linear history via fast-forward merge). If conflicts occur, you'll need to
   resolve them manually in the worktree and run `git rebase --continue`.
 - `--squash`: Squash all commits from the feature branch into a single commit on
-  main. You'll be prompted to provide a commit message in your editor.
+  the target. You'll be prompted to provide a commit message in your editor.
 
 #### What happens
 
 1. Determines which branch to merge (specified branch or current branch if
    omitted)
-2. Checks for uncommitted changes (errors if found, unless
+2. Determines the target branch (`--into` or main branch from config)
+3. Checks for uncommitted changes (errors if found, unless
    `--ignore-uncommitted` is used)
-3. Commits staged changes if present (unless `--ignore-uncommitted` is used)
-4. Merges your branch into main using the selected strategy (default: merge
-   commit)
-5. Deletes the tmux window (including the one you're currently in if you ran
+4. Commits staged changes if present (unless `--ignore-uncommitted` is used)
+5. Merges your branch into the target using the selected strategy (default:
+   merge commit)
+6. Deletes the tmux window (including the one you're currently in if you ran
    this from a worktree) — skipped if `--keep` is used
-6. Removes the worktree — skipped if `--keep` is used
-7. Deletes the local branch — skipped if `--keep` is used
+7. Removes the worktree — skipped if `--keep` is used
+8. Deletes the local branch — skipped if `--keep` is used
 
 #### Typical workflow
 
@@ -619,7 +634,7 @@ you're on, merge it into main, and close the current window as part of cleanup.
 #### Examples
 
 ```bash
-# Merge branch from main branch (default: merge commit)
+# Merge branch into main (default: merge commit)
 workmux merge user-auth
 
 # Merge the current worktree you're in
@@ -632,13 +647,13 @@ workmux merge user-auth --rebase
 # Squash all commits into a single commit
 workmux merge user-auth --squash
 
-# Merge and also delete the remote branch
-workmux merge user-auth --delete-remote
-
 # Merge but keep the worktree/window/branch to verify before cleanup
 workmux merge user-auth --keep
 # ... verify the merge in main ...
 workmux remove user-auth  # clean up later when ready
+
+# Merge into a different branch (stacked PRs)
+workmux merge feature/subtask --into feature/parent
 ```
 
 ---
@@ -653,9 +668,8 @@ branch). Useful for abandoning work or cleaning up experimental branches.
 #### Options
 
 - `--force`, `-f`: Skip confirmation prompt and ignore uncommitted changes
-- `--delete-remote`, `-r`: Also delete the remote branch
 - `--keep-branch`, `-k`: Remove only the worktree and tmux window while keeping
-  the local branch (incompatible with `--delete-remote`)
+  the local branch
 
 #### Examples
 
@@ -759,19 +773,24 @@ workmux open user-auth --force-files
 
 ---
 
-### `workmux path <branch-name>`
+### `workmux path <name>`
 
 Prints the filesystem path of an existing worktree. Useful for scripting or
 quickly navigating to a worktree directory.
 
-- `<branch-name>`: Name of the branch that has an existing worktree.
+- `<name>`: Name of the worktree (can be either the branch name or the worktree
+  directory name).
 
 #### Examples
 
 ```bash
-# Get the path of a worktree
+# Get the path of a worktree by branch name
 workmux path user-auth
 # Output: /Users/you/project__worktrees/user-auth
+
+# Get the path by worktree directory name (if using custom names)
+workmux path ABC-123
+# Output: /Users/you/project__worktrees/ABC-123
 
 # Use in scripts or with cd
 cd "$(workmux path user-auth)"
@@ -836,6 +855,66 @@ workmux completions zsh
 
 See the [Shell Completions](#shell-completions) section for installation
 instructions.
+
+## Agent status tracking
+
+Workmux can display the status of Claude Code in your tmux window list, giving
+you at-a-glance visibility into what the agent in each window doing.
+
+![tmux status showing agent icons](https://raw.githubusercontent.com/raine/workmux/refs/heads/main/meta/status.webp)
+
+#### Key
+
+- 🤖 = agent is working
+- 💬 = agent is waiting for user input
+- ✅ = agent finished (auto-clears on window focus)
+
+Currently only Claude Code seems to support hooks that enable this kind of
+functionality. Gemini's support is
+[on the way](https://github.com/google-gemini/gemini-cli/issues/9070).
+
+### Setup
+
+Install the workmux status plugin in Claude Code:
+
+```
+claude plugin marketplace add raine/workmux
+claude plugin install workmux-status
+```
+
+Alternatively, you can manually add the hooks to `~/.claude/settings.json`. See
+[.claude-plugin/plugin.json](.claude-plugin/plugin.json) for the hook
+configuration.
+
+Workmux automatically modifies your tmux `window-status-format` to display the
+status icons. This happens once per session and only affects the current tmux
+session (not your global config).
+
+### Customization
+
+You can customize the icons in your config:
+
+```yaml
+# ~/.config/workmux/config.yaml
+status_icons:
+  working: '🔄'
+  waiting: '⏸️'
+  done: '✔️'
+```
+
+If you prefer to manage the tmux format yourself, disable auto-modification and
+add the status variable to your `~/.tmux.conf`:
+
+```yaml
+# ~/.config/workmux/config.yaml
+status_format: false
+```
+
+```bash
+# ~/.tmux.conf
+set -g window-status-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
+set -g window-status-current-format '#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }'
+```
 
 ## Workflow example
 
@@ -1013,7 +1092,7 @@ dependencies, so it's generally safer to run a fresh install in each worktree.
 
 Note: In large monorepos, cleaning up `node_modules` during worktree removal can
 take significant time. workmux has a
-[special cleanup mechanism](https://github.com/raine/workmux/blob/main/src/config.rs#L12)
+[special cleanup mechanism](https://github.com/raine/workmux/blob/main/src/scripts/cleanup_node_modules.sh)
 that moves `node_modules` to a temporary location and deletes it in the
 background, making the `remove` command return almost instantly.
 

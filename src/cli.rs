@@ -26,14 +26,26 @@ impl WorktreeBranchParser {
 
         let main_branch = git::get_default_branch().ok();
 
-        worktrees
-            .into_iter()
-            .map(|(_, branch)| branch)
-            // Filter out the main branch, as it's not a candidate for merging/removing.
-            .filter(|branch| main_branch.as_deref() != Some(branch.as_str()))
-            // Filter out detached HEAD states.
-            .filter(|branch| branch != "(detached)")
-            .collect()
+        // Collect both branch names and directory basenames (handles)
+        let mut names: Vec<String> = Vec::new();
+        for (path, branch) in worktrees {
+            // Skip main branch and detached HEAD
+            if main_branch.as_deref() == Some(branch.as_str()) || branch == "(detached)" {
+                continue;
+            }
+
+            // Add branch name
+            names.push(branch);
+
+            // Add directory basename if different from branch
+            if let Some(dir_name) = path.file_name().and_then(|s| s.to_str()) {
+                if !names.contains(&dir_name.to_string()) {
+                    names.push(dir_name.to_string());
+                }
+            }
+        }
+
+        names
     }
 }
 
@@ -147,9 +159,9 @@ enum Commands {
 
     /// Open a tmux window for an existing worktree
     Open {
-        /// Name of the branch with an existing worktree
+        /// Branch name or worktree directory name
         #[arg(value_parser = WorktreeBranchParser::new())]
-        branch_name: String,
+        name: String,
 
         /// Re-run post-create hooks (e.g., pnpm install)
         #[arg(long)]
@@ -166,13 +178,13 @@ enum Commands {
         #[arg(value_parser = WorktreeBranchParser::new())]
         branch_name: Option<String>,
 
+        /// The target branch to merge into (defaults to main_branch from config)
+        #[arg(long, value_parser = GitBranchParser::new())]
+        into: Option<String>,
+
         /// Ignore uncommitted and staged changes
         #[arg(long)]
         ignore_uncommitted: bool,
-
-        /// Also delete the remote branch
-        #[arg(short = 'r', long)]
-        delete_remote: bool,
 
         /// Rebase the branch onto the main branch before merging (fast-forward)
         #[arg(long, group = "merge_strategy")]
@@ -183,7 +195,7 @@ enum Commands {
         squash: bool,
 
         /// Keep the worktree, window, and branch after merging (skip cleanup)
-        #[arg(short = 'k', long, conflicts_with = "delete_remote")]
+        #[arg(short = 'k', long)]
         keep: bool,
     },
 
@@ -198,12 +210,8 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
 
-        /// Also delete the remote branch
-        #[arg(short = 'r', long)]
-        delete_remote: bool,
-
         /// Keep the local branch (only remove worktree and tmux window)
-        #[arg(short = 'k', long, conflicts_with = "delete_remote")]
+        #[arg(short = 'k', long)]
         keep_branch: bool,
     },
 
@@ -225,6 +233,13 @@ enum Commands {
     Claude {
         #[command(subcommand)]
         command: ClaudeCommands,
+    },
+
+    /// Set agent status for the current tmux window (used by hooks)
+    #[command(hide = true)]
+    SetWindowStatus {
+        #[command(subcommand)]
+        command: command::set_window_status::SetWindowStatusCommand,
     },
 
     /// Generate shell completions
@@ -274,21 +289,21 @@ pub fn run() -> Result<()> {
             multi,
         ),
         Commands::Open {
-            branch_name,
+            name,
             run_hooks,
             force_files,
-        } => command::open::run(&branch_name, run_hooks, force_files),
+        } => command::open::run(&name, run_hooks, force_files),
         Commands::Merge {
             branch_name,
+            into,
             ignore_uncommitted,
-            delete_remote,
             rebase,
             squash,
             keep,
         } => command::merge::run(
             branch_name.as_deref(),
+            into.as_deref(),
             ignore_uncommitted,
-            delete_remote,
             rebase,
             squash,
             keep,
@@ -296,15 +311,15 @@ pub fn run() -> Result<()> {
         Commands::Remove {
             branch_name,
             force,
-            delete_remote,
             keep_branch,
-        } => command::remove::run(branch_name.as_deref(), force, delete_remote, keep_branch),
+        } => command::remove::run(branch_name.as_deref(), force, keep_branch),
         Commands::List => command::list::run(),
         Commands::Path { branch_name } => command::path::run(&branch_name),
         Commands::Init => crate::config::Config::init(),
         Commands::Claude { command } => match command {
             ClaudeCommands::Prune => prune_claude_config(),
         },
+        Commands::SetWindowStatus { command } => command::set_window_status::run(command),
         Commands::Completions { shell } => {
             generate_completions(shell);
             Ok(())
@@ -351,138 +366,13 @@ fn generate_completions(shell: Shell) {
 }
 
 fn print_zsh_dynamic_completion() {
-    print!(
-        r#"
-# Dynamic branch completion - runs git only when TAB is pressed
-_workmux_branches() {{
-    local branches
-    branches=("${{(@f)$(workmux __complete-branches 2>/dev/null)}}")
-    compadd -a branches
-}}
-
-# Dynamic git branch completion for add command
-_workmux_git_branches() {{
-    local branches
-    branches=("${{(@f)$(workmux __complete-git-branches 2>/dev/null)}}")
-    compadd -a branches
-}}
-
-# Override completion for commands that take branch names
-_workmux_dynamic() {{
-    # Get the subcommand (second word)
-    local cmd="${{words[2]}}"
-
-    # Only handle commands that need dynamic branch completion
-    case "$cmd" in
-        open|merge|remove|rm|path)
-            # If completing a flag, use generated completions
-            if [[ "${{words[CURRENT]}}" == -* ]]; then
-                _workmux "$@"
-                return
-            fi
-            # For positional args after the subcommand, offer branches
-            if (( CURRENT > 2 )); then
-                _workmux_branches
-                return
-            fi
-            ;;
-        add)
-            # If completing a flag, use generated completions
-            if [[ "${{words[CURRENT]}}" == -* ]]; then
-                _workmux "$@"
-                return
-            fi
-            # For positional args after the subcommand, offer git branches
-            if (( CURRENT > 2 )); then
-                _workmux_git_branches
-                return
-            fi
-            ;;
-    esac
-
-    # For all other commands and cases, use generated completions
-    _workmux "$@"
-}}
-
-compdef _workmux_dynamic workmux
-"#
-    );
+    print!("{}", include_str!("scripts/completions/zsh_dynamic.zsh"));
 }
 
 fn print_bash_dynamic_completion() {
-    print!(
-        r#"
-# Dynamic branch completion for open/merge/remove commands
-_workmux_branches() {{
-    workmux __complete-branches 2>/dev/null
-}}
-
-# Dynamic git branch completion for add command
-_workmux_git_branches() {{
-    workmux __complete-git-branches 2>/dev/null
-}}
-
-# Wrapper that adds dynamic branch completion
-_workmux_dynamic() {{
-    local cur prev words cword
-
-    # Use _init_completion if available, otherwise fall back to manual parsing
-    if declare -F _init_completion >/dev/null 2>&1; then
-        _init_completion || return
-    else
-        COMPREPLY=()
-        cur="${{COMP_WORDS[COMP_CWORD]}}"
-        prev="${{COMP_WORDS[COMP_CWORD-1]}}"
-        words=("${{COMP_WORDS[@]}}")
-        cword=$COMP_CWORD
-    fi
-
-    # Check if we're completing a branch argument for specific commands
-    if [[ ${{cword}} -ge 2 ]]; then
-        local cmd="${{words[1]}}"
-        case "$cmd" in
-            open|merge|remove|rm|path)
-                # If not typing a flag, complete with branches
-                if [[ "$cur" != -* ]]; then
-                    COMPREPLY=($(compgen -W "$(_workmux_branches)" -- "$cur"))
-                    return
-                fi
-                ;;
-            add)
-                # If not typing a flag, complete with git branches
-                if [[ "$cur" != -* ]]; then
-                    COMPREPLY=($(compgen -W "$(_workmux_git_branches)" -- "$cur"))
-                    return
-                fi
-                ;;
-        esac
-    fi
-
-    # Fall back to generated completions
-    _workmux
-}}
-
-complete -F _workmux_dynamic -o bashdefault -o default workmux
-"#
-    );
+    print!("{}", include_str!("scripts/completions/bash_dynamic.bash"));
 }
 
 fn print_fish_dynamic_completion() {
-    print!(
-        r#"
-# Dynamic branch completion for open/merge/remove commands
-function __workmux_branches
-    workmux __complete-branches 2>/dev/null
-end
-
-# Dynamic git branch completion for add command
-function __workmux_git_branches
-    workmux __complete-git-branches 2>/dev/null
-end
-
-# Add dynamic completions for commands that take branch names
-complete -c workmux -n '__fish_seen_subcommand_from open merge remove rm path' -f -a '(__workmux_branches)'
-complete -c workmux -n '__fish_seen_subcommand_from add' -f -a '(__workmux_git_branches)'
-"#
-    );
+    print!("{}", include_str!("scripts/completions/fish_dynamic.fish"));
 }

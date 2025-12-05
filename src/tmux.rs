@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::{debug, trace, warn};
 
 use crate::cmd::Cmd;
 use crate::config::{PaneConfig, SplitDirection};
@@ -189,6 +190,7 @@ fn wait_for_pane_ready(channel: &str) -> Result<()> {
     // Handshake Part 3: Wait for shell to unlock (by attempting to lock again)
     // This blocks until the shell runs `tmux wait-for -U`
     // Use a polling loop with timeout to prevent indefinite hangs if pane fails to start
+    debug!(channel = channel, "tmux:handshake start");
 
     let mut child = std::process::Command::new("tmux")
         .args(["wait-for", "-L", channel])
@@ -209,10 +211,12 @@ fn wait_for_pane_ready(channel: &str) -> Result<()> {
                         .args(&["wait-for", "-U", channel])
                         .run()
                         .context("Failed to cleanup wait channel")?;
+                    debug!(channel = channel, "tmux:handshake success");
                     return Ok(());
                 } else {
                     // Attempt cleanup even on failure
                     let _ = Cmd::new("tmux").args(&["wait-for", "-U", channel]).run();
+                    warn!(channel = channel, status = ?status.code(), "tmux:handshake failed (wait-for error)");
                     return Err(anyhow!(
                         "Pane handshake failed - tmux wait-for returned error"
                     ));
@@ -226,17 +230,28 @@ fn wait_for_pane_ready(channel: &str) -> Result<()> {
                     // Attempt cleanup
                     let _ = Cmd::new("tmux").args(&["wait-for", "-U", channel]).run();
 
+                    warn!(
+                        channel = channel,
+                        timeout_secs = HANDSHAKE_TIMEOUT_SECS,
+                        "tmux:handshake timeout"
+                    );
                     return Err(anyhow!(
                         "Pane handshake timed out after {}s - shell may have failed to start",
                         HANDSHAKE_TIMEOUT_SECS
                     ));
                 }
+                trace!(
+                    channel = channel,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "tmux:handshake waiting"
+                );
                 thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = Cmd::new("tmux").args(&["wait-for", "-U", channel]).run();
+                warn!(channel = channel, error = %e, "tmux:handshake error");
                 return Err(anyhow!("Error waiting for pane handshake: {}", e));
             }
         }
@@ -549,16 +564,86 @@ fn rewrite_agent_command(
     }
 
     // Add the prompt argument (agent-specific handling)
-    let is_gemini = pane_stem.and_then(|s| s.to_str()) == Some("gemini");
-    if is_gemini {
+    let pane_stem_str = pane_stem.and_then(|s| s.to_str());
+    if pane_stem_str == Some("gemini") {
         // gemini uses -i flag with the prompt as its argument
         cmd.push_str(&format!(" -i \"$(cat {})\"", prompt_path));
+    } else if pane_stem_str == Some("opencode") {
+        // opencode uses -p flag for interactive TUI with initial prompt
+        // (opencode run is non-interactive, similar to claude -p)
+        cmd.push_str(&format!(" -p \"$(cat {})\"", prompt_path));
     } else {
         // Other agents use -- separator
         cmd.push_str(&format!(" -- \"$(cat {})\"", prompt_path));
     }
 
     Some(cmd)
+}
+
+// --- Status Format Management ---
+
+/// Format string to inject into tmux window-status-format.
+/// Uses conditional: only shows space + icon when @workmux_status is set.
+const WORKMUX_STATUS_FORMAT: &str = "#{?@workmux_status, #{@workmux_status},}";
+
+/// Ensures the tmux window's status format includes workmux status.
+/// Sets format per-window to avoid affecting non-workmux windows or other sessions.
+/// Uses pane target to set on the correct window (not the focused one).
+pub fn ensure_status_format(pane: &str) -> Result<()> {
+    update_format_option(pane, "window-status-format")?;
+    update_format_option(pane, "window-status-current-format")?;
+    Ok(())
+}
+
+/// Updates a single tmux format option for the target window to include workmux status.
+fn update_format_option(pane: &str, option: &str) -> Result<()> {
+    // Read current format. Try window-level first, fall back to global.
+    // Note: show-option -wv returns empty string (not error) when no window option exists.
+    let window_format = Cmd::new("tmux")
+        .args(&["show-option", "-wv", "-t", pane, option])
+        .run_and_capture_stdout()
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let current = match window_format {
+        Some(fmt) => fmt,
+        None => Cmd::new("tmux")
+            .args(&["show-option", "-gv", option])
+            .run_and_capture_stdout()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "#I:#W#{?window_flags,#{window_flags}, }".to_string()),
+    };
+
+    if !current.contains("@workmux_status") {
+        let new_format = inject_status_format(&current);
+        // Set per-window to avoid affecting other windows/sessions
+        Cmd::new("tmux")
+            .args(&["set-option", "-w", "-t", pane, option, &new_format])
+            .run()?;
+    }
+    Ok(())
+}
+
+/// Injects workmux status format into an existing format string.
+/// Inserts before window_flags if present, otherwise appends to end.
+fn inject_status_format(format: &str) -> String {
+    // Match common window_flags patterns:
+    // - #{window_flags} or #{window_flags,...}
+    // - #{?window_flags,...} (conditional)
+    // - #{F} (short alias for window_flags)
+    let patterns = ["#{window_flags", "#{?window_flags", "#{F}"];
+
+    let insert_pos = patterns.iter().filter_map(|p| format.find(p)).min(); // Find earliest occurrence
+
+    if let Some(pos) = insert_pos {
+        // Insert before window_flags
+        let (before, after) = format.split_at(pos);
+        format!("{}{}{}", before, WORKMUX_STATUS_FORMAT, after)
+    } else {
+        // Append to end
+        format!("{}{}", format, WORKMUX_STATUS_FORMAT)
+    }
 }
 
 #[cfg(test)]
@@ -661,5 +746,66 @@ mod tests {
 
         let result = rewrite_agent_command("", &prompt_file, &working_dir, Some("claude"));
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_rewrite_opencode_command_basic() {
+        let prompt_file = PathBuf::from("/tmp/worktree/PROMPT.md");
+        let working_dir = PathBuf::from("/tmp/worktree");
+
+        let result =
+            rewrite_agent_command("opencode", &prompt_file, &working_dir, Some("opencode"));
+        assert_eq!(result, Some("opencode -p \"$(cat PROMPT.md)\"".to_string()));
+    }
+
+    // --- inject_status_format tests ---
+
+    #[test]
+    fn test_inject_status_format_standard() {
+        // Standard default format with conditional window_flags
+        let input = "#I:#W#{?window_flags,#{window_flags}, }";
+        let result = inject_status_format(input);
+        assert_eq!(
+            result,
+            "#I:#W#{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags}, }"
+        );
+    }
+
+    #[test]
+    fn test_inject_status_format_short_flags() {
+        // Short format with #{F}
+        let input = "#I:#W#{F}";
+        let result = inject_status_format(input);
+        assert_eq!(result, "#I:#W#{?@workmux_status, #{@workmux_status},}#{F}");
+    }
+
+    #[test]
+    fn test_inject_status_format_no_flags() {
+        // Format without window_flags - append to end
+        let input = "#I:#W";
+        let result = inject_status_format(input);
+        assert_eq!(result, "#I:#W#{?@workmux_status, #{@workmux_status},}");
+    }
+
+    #[test]
+    fn test_inject_status_format_complex() {
+        // Complex format with styling
+        let input = "#[fg=blue]#I#[default] #{?window_flags,#{window_flags},}";
+        let result = inject_status_format(input);
+        assert_eq!(
+            result,
+            "#[fg=blue]#I#[default] #{?@workmux_status, #{@workmux_status},}#{?window_flags,#{window_flags},}"
+        );
+    }
+
+    #[test]
+    fn test_inject_status_format_bare_window_flags() {
+        // Bare #{window_flags} without conditional
+        let input = "#I:#W#{window_flags}";
+        let result = inject_status_format(input);
+        assert_eq!(
+            result,
+            "#I:#W#{?@workmux_status, #{@workmux_status},}#{window_flags}"
+        );
     }
 }

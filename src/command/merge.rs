@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 
 pub fn run(
     branch_name: Option<&str>,
+    into_branch: Option<&str>,
     ignore_uncommitted: bool,
-    delete_remote: bool,
     mut rebase: bool,
     mut squash: bool,
     keep: bool,
@@ -25,9 +25,9 @@ pub fn run(
         }
     }
 
-    // Resolve branch name from argument or current branch
+    // Resolve branch name from argument (supports worktree dir name) or current branch
     // Note: Must be done BEFORE creating WorkflowContext (which may change CWD)
-    let branch_to_merge = super::resolve_branch(branch_name, "merge")?;
+    let branch_to_merge = super::resolve_worktree_name(branch_name, "merge")?;
 
     let context = WorkflowContext::new(config)?;
 
@@ -38,8 +38,8 @@ pub fn run(
 
     let result = workflow::merge(
         &branch_to_merge,
+        into_branch,
         ignore_uncommitted,
-        delete_remote,
         rebase,
         squash,
         keep,

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 use crate::{cmd, git};
 use which::{which, which_in};
@@ -9,31 +10,7 @@ use which::{which, which_in};
 /// Default script for cleaning up node_modules directories before worktree deletion.
 /// This script moves node_modules to a temporary location and deletes them in the background,
 /// making the workmux remove command return almost instantly.
-const NODE_MODULES_CLEANUP_SCRIPT: &str = r#"#!/bin/bash
-set -euo pipefail
-
-# Create a temporary directory that will be cleaned up on script exit (success or error)
-TRASH_DIR=$(mktemp -d)
-trap 'rm -rf "$TRASH_DIR"' EXIT
-
-# Find and move all node_modules directories
-# -prune prevents descending into node_modules directories
-find . -name "node_modules" -type d -prune -print0 | while IFS= read -r -d '' dir; do
-  # Generate unique name from path: './frontend/node_modules' -> 'frontend_node_modules'
-  unique_name=$(printf '%s\n' "${dir#./}" | tr '/' '_')
-
-  if ! mv -- "$dir" "$TRASH_DIR/$unique_name"; then
-    echo "Warning: Failed to move '$dir'. Check permissions." >&2
-  fi
-done
-
-# Detach the final slow deletion from the script's execution
-if [ -n "$(ls -A "$TRASH_DIR")" ]; then
-  # Disown the trap and start a new background process for deletion
-  trap - EXIT
-  nohup rm -rf "$TRASH_DIR" >/dev/null 2>&1 &
-fi
-"#;
+const NODE_MODULES_CLEANUP_SCRIPT: &str = include_str!("scripts/cleanup_node_modules.sh");
 
 /// Configuration for file operations during worktree creation
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
@@ -45,6 +22,31 @@ pub struct FileConfig {
     /// Glob patterns for files to symlink from the repo root into the new worktree
     #[serde(default)]
     pub symlink: Option<Vec<String>>,
+}
+
+/// Configuration for agent status icons displayed in tmux window bar
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct StatusIcons {
+    /// Icon shown when agent is working. Default: 🤖
+    pub working: Option<String>,
+    /// Icon shown when agent is waiting for input. Default: 💬
+    pub waiting: Option<String>,
+    /// Icon shown when agent is done. Default: ✅
+    pub done: Option<String>,
+}
+
+impl StatusIcons {
+    pub fn working(&self) -> &str {
+        self.working.as_deref().unwrap_or("🤖")
+    }
+
+    pub fn waiting(&self) -> &str {
+        self.waiting.as_deref().unwrap_or("💬")
+    }
+
+    pub fn done(&self) -> &str {
+        self.done.as_deref().unwrap_or("✅")
+    }
 }
 
 /// Configuration for the workmux tool, read from .workmux.yaml
@@ -94,6 +96,15 @@ pub struct Config {
     /// File operations to perform after creating the worktree
     #[serde(default)]
     pub files: FileConfig,
+
+    /// Whether to auto-apply workmux status to tmux window format.
+    /// Default: true
+    #[serde(default)]
+    pub status_format: Option<bool>,
+
+    /// Custom icons for agent status display.
+    #[serde(default)]
+    pub status_icons: StatusIcons,
 }
 
 /// Configuration for a single tmux pane
@@ -227,6 +238,7 @@ pub fn validate_panes_config(panes: &[PaneConfig]) -> anyhow::Result<()> {
 impl Config {
     /// Load and merge global and project configurations.
     pub fn load(cli_agent: Option<&str>) -> anyhow::Result<Self> {
+        debug!("config:loading");
         let global_config = Self::load_global()?.unwrap_or_default();
         let project_config = Self::load_project()?.unwrap_or_default();
 
@@ -273,6 +285,11 @@ impl Config {
             }
         }
 
+        debug!(
+            agent = ?config.agent,
+            panes = config.panes.as_ref().map_or(0, |p| p.len()),
+            "config:loaded"
+        );
         Ok(config)
     }
 
@@ -281,6 +298,7 @@ impl Config {
         if !path.exists() {
             return Ok(None);
         }
+        debug!(path = %path.display(), "config:reading file");
         let contents = fs::read_to_string(path)?;
         let config: Config = serde_yaml::from_str(&contents)
             .map_err(|e| anyhow::anyhow!("Failed to parse config at {}: {}", path.display(), e))?;
@@ -303,33 +321,54 @@ impl Config {
         Ok(None)
     }
 
-    /// Load the project-specific configuration file from the current directory.
+    /// Load the project-specific configuration file.
+    ///
+    /// Searches for `.workmux.yaml` or `.workmux.yml` in the following order:
+    /// 1. Current worktree root (allows branch-specific config overrides)
+    /// 2. Main worktree root (shared config across all worktrees)
+    /// 3. Falls back gracefully when not in a git repository
     fn load_project() -> anyhow::Result<Option<Self>> {
-        let config_path_yaml = Path::new(".workmux.yaml");
-        if config_path_yaml.exists() {
-            return Self::load_from_path(config_path_yaml);
+        let config_names = [".workmux.yaml", ".workmux.yml"];
+
+        // Build list of directories to search
+        let mut search_dirs = Vec::new();
+        if let Ok(repo_root) = git::get_repo_root() {
+            search_dirs.push(repo_root.clone());
+            // Also check main worktree root if different from current worktree
+            if let Ok(main_root) = git::get_main_worktree_root()
+                && main_root != repo_root
+            {
+                search_dirs.push(main_root);
+            }
         }
-        let config_path_yml = Path::new(".workmux.yml");
-        if config_path_yml.exists() {
-            return Self::load_from_path(config_path_yml);
+
+        // Search for config in each directory
+        for dir in search_dirs {
+            for name in &config_names {
+                let config_path = dir.join(name);
+                if config_path.exists() {
+                    debug!(path = %config_path.display(), "config:found project config");
+                    return Self::load_from_path(&config_path);
+                }
+            }
         }
+
         Ok(None)
     }
 
     /// Merge a project config into a global config.
     /// Project config takes precedence. For lists, "<global>" placeholder expands to global items.
     fn merge(self, project: Self) -> Self {
-        // Helper to merge vectors with "<global>" placeholder expansion
+        /// Merge vectors with "<global>" placeholder expansion.
+        /// When project contains "<global>", it expands to global items at that position.
         fn merge_vec_with_placeholder(
             global: Option<Vec<String>>,
             project: Option<Vec<String>>,
         ) -> Option<Vec<String>> {
             match (global, project) {
                 (Some(global_items), Some(project_items)) => {
-                    // Check if project items contain the "<global>" placeholder
                     let has_placeholder = project_items.iter().any(|s| s == "<global>");
                     if has_placeholder {
-                        // Replace "<global>" with global items
                         let mut result = Vec::new();
                         for item in project_items {
                             if item == "<global>" {
@@ -340,7 +379,6 @@ impl Config {
                         }
                         Some(result)
                     } else {
-                        // No placeholder, project completely replaces global
                         Some(project_items)
                     }
                 }
@@ -348,35 +386,56 @@ impl Config {
             }
         }
 
-        Self {
-            // Scalar values: project wins
-            main_branch: project.main_branch.or(self.main_branch),
-            worktree_dir: project.worktree_dir.or(self.worktree_dir),
-            window_prefix: project.window_prefix.or(self.window_prefix),
-            agent: project.agent.or(self.agent),
-            merge_strategy: project.merge_strategy.or(self.merge_strategy),
-
-            // Worktree naming: project wins if not default
-            worktree_naming: if project.worktree_naming != WorktreeNaming::default() {
-                project.worktree_naming
-            } else {
-                self.worktree_naming
-            },
-            worktree_prefix: project.worktree_prefix.or(self.worktree_prefix),
-
-            // Panes: project replaces global (no placeholder support)
-            panes: project.panes.or(self.panes),
-
-            // List values with placeholder support
-            post_create: merge_vec_with_placeholder(self.post_create, project.post_create),
-            pre_delete: merge_vec_with_placeholder(self.pre_delete, project.pre_delete),
-
-            // File config with placeholder support
-            files: FileConfig {
-                copy: merge_vec_with_placeholder(self.files.copy, project.files.copy),
-                symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
-            },
+        /// Macro to merge Option fields where project overrides global.
+        /// Reduces boilerplate for simple `project.field.or(self.field)` patterns.
+        macro_rules! merge_options {
+            ($global:expr, $project:expr, $($field:ident),+ $(,)?) => {
+                Self {
+                    $($field: $project.$field.or($global.$field),)+
+                    ..Default::default()
+                }
+            };
         }
+
+        // Merge simple Option<T> fields using the macro
+        let mut merged = merge_options!(
+            self,
+            project,
+            main_branch,
+            worktree_dir,
+            window_prefix,
+            agent,
+            merge_strategy,
+            worktree_prefix,
+            panes,
+            status_format,
+        );
+
+        // Special case: worktree_naming (project wins if not default)
+        merged.worktree_naming = if project.worktree_naming != WorktreeNaming::default() {
+            project.worktree_naming
+        } else {
+            self.worktree_naming
+        };
+
+        // List values with "<global>" placeholder support
+        merged.post_create = merge_vec_with_placeholder(self.post_create, project.post_create);
+        merged.pre_delete = merge_vec_with_placeholder(self.pre_delete, project.pre_delete);
+
+        // File config with placeholder support
+        merged.files = FileConfig {
+            copy: merge_vec_with_placeholder(self.files.copy, project.files.copy),
+            symlink: merge_vec_with_placeholder(self.files.symlink, project.files.symlink),
+        };
+
+        // Status icons: per-field override
+        merged.status_icons = StatusIcons {
+            working: project.status_icons.working.or(self.status_icons.working),
+            waiting: project.status_icons.waiting.or(self.status_icons.waiting),
+            done: project.status_icons.done.or(self.status_icons.done),
+        };
+
+        merged
     }
 
     /// Get default panes.

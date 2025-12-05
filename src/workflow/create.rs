@@ -1,36 +1,26 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
-use crate::{git, prompt::Prompt, tmux};
+use crate::{git, tmux};
 use tracing::{debug, info, warn};
 
 use super::cleanup;
 use super::context::WorkflowContext;
 use super::setup;
-use super::types::{CreateResult, SetupOptions};
+use super::types::{CreateArgs, CreateResult, SetupOptions};
 
 /// Create a new worktree with tmux window and panes
-///
-/// # Arguments
-/// * `branch_name` - The git branch name (used for git operations)
-/// * `handle` - The display name for worktree directory and tmux window
-/// * `base_branch` - Optional base branch/commit/tag to branch from
-/// * `remote_branch` - Optional remote branch reference
-/// * `prompt` - Optional prompt for AI agents
-/// * `context` - Workflow context with config and repo info
-/// * `options` - Setup options (hooks, file ops, etc.)
-/// * `agent` - Optional agent override
-#[allow(clippy::too_many_arguments)]
-pub fn create(
-    branch_name: &str,
-    handle: &str,
-    base_branch: Option<&str>,
-    remote_branch: Option<&str>,
-    prompt: Option<&Prompt>,
-    context: &WorkflowContext,
-    options: SetupOptions,
-    agent: Option<&str>,
-) -> Result<CreateResult> {
+pub fn create(context: &WorkflowContext, args: CreateArgs) -> Result<CreateResult> {
+    let CreateArgs {
+        branch_name,
+        handle,
+        base_branch,
+        remote_branch,
+        prompt,
+        options,
+        agent,
+    } = args;
+
     info!(
         branch = branch_name,
         handle = handle,
@@ -125,24 +115,26 @@ pub fn create(
     };
 
     // Determine worktree path: use config.worktree_dir or default to <project>__worktrees pattern
+    // Always use main_worktree_root (not repo_root) to ensure consistent paths even when
+    // running from inside an existing worktree.
     let base_dir = if let Some(ref worktree_dir) = context.config.worktree_dir {
         let path = Path::new(worktree_dir);
         if path.is_absolute() {
             // Use absolute path as-is
             path.to_path_buf()
         } else {
-            // Relative path: resolve from repo root
-            context.repo_root.join(path)
+            // Relative path: resolve from main worktree root
+            context.main_worktree_root.join(path)
         }
     } else {
-        // Default behavior: <project_root>/../<project_name>__worktrees
+        // Default behavior: <main_worktree_root>/../<project_name>__worktrees
         let project_name = context
-            .repo_root
+            .main_worktree_root
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("Could not determine project name"))?;
         context
-            .repo_root
+            .main_worktree_root
             .parent()
             .ok_or_else(|| anyhow!("Could not determine parent directory"))?
             .join(format!("{}__worktrees", project_name))
@@ -268,14 +260,16 @@ pub fn create_with_changes(
 
     // 2. Create new worktree
     let create_result = match create(
-        branch_name,
-        handle,
-        None,
-        None,
-        None,
         context,
-        options,
-        None,
+        CreateArgs {
+            branch_name,
+            handle,
+            base_branch: None,
+            remote_branch: None,
+            prompt: None,
+            options,
+            agent: None,
+        },
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -317,15 +311,14 @@ pub fn create_with_changes(
                 handle,
                 &create_result.worktree_path,
                 true,  // force
-                false, // delete_remote
                 false, // keep_branch
             )
             .context(
                 "Rollback failed: could not clean up the new worktree. Please do so manually.",
             )?;
 
-            // Handle tmux window navigation/closing based on whether we're inside the target window
-            cleanup::navigate_to_main_and_close(
+            // Handle tmux window navigation/closing based on whether we're inside the source window
+            cleanup::navigate_to_target_and_close(
                 &context.prefix,
                 &context.main_branch,
                 handle,

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::process::Command;
+use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct PrDetails {
@@ -31,6 +32,87 @@ impl PrDetails {
     }
 }
 
+/// Summary of a PR found by head ref search
+#[derive(Debug, Deserialize)]
+pub struct PrSummary {
+    pub number: u32,
+    pub title: String,
+    pub state: String,
+    #[serde(rename = "isDraft")]
+    pub is_draft: bool,
+}
+
+/// Internal struct for parsing PR list results with owner info
+#[derive(Debug, Deserialize)]
+struct PrListResult {
+    pub number: u32,
+    pub title: String,
+    pub state: String,
+    #[serde(rename = "isDraft")]
+    pub is_draft: bool,
+    #[serde(rename = "headRepositoryOwner")]
+    pub head_repository_owner: RepositoryOwner,
+}
+
+/// Find a PR by its head ref (e.g., "owner:branch" format).
+/// Returns None if no PR is found, or the first matching PR if found.
+pub fn find_pr_by_head_ref(owner: &str, branch: &str) -> Result<Option<PrSummary>> {
+    // gh pr list --head only matches branch name, not owner:branch format
+    // So we query by branch and filter by owner in the results
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all", // Include closed/merged PRs
+            "--json",
+            "number,title,state,isDraft,headRepositoryOwner",
+            "--limit",
+            "50", // Get enough results to handle common branch names
+        ])
+        .output();
+
+    let output = match output {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!("github:gh CLI not found, skipping PR lookup");
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(e).context("Failed to execute gh command");
+        }
+    };
+
+    if !output.status.success() {
+        debug!(
+            owner = owner,
+            branch = branch,
+            "github:pr list failed, treating as no PR found"
+        );
+        return Ok(None);
+    }
+
+    let json_str = String::from_utf8(output.stdout).context("gh output is not valid UTF-8")?;
+
+    // gh pr list returns an array
+    let prs: Vec<PrListResult> =
+        serde_json::from_str(&json_str).context("Failed to parse gh JSON output")?;
+
+    // Find the PR from the specified owner (case-insensitive, as GitHub usernames are case-insensitive)
+    let matching_pr = prs
+        .into_iter()
+        .find(|pr| pr.head_repository_owner.login.eq_ignore_ascii_case(owner));
+
+    Ok(matching_pr.map(|pr| PrSummary {
+        number: pr.number,
+        title: pr.title,
+        state: pr.state,
+        is_draft: pr.is_draft,
+    }))
+}
+
 /// Fetches pull request details using the GitHub CLI
 pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
     // Fetch PR details using gh CLI
@@ -48,6 +130,7 @@ pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
     let output = match output {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!("github:gh CLI not found");
             return Err(anyhow!(
                 "GitHub CLI (gh) is required for --pr. Install from https://cli.github.com"
             ));
@@ -59,6 +142,7 @@ pub fn get_pr_details(pr_number: u32) -> Result<PrDetails> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!(pr = pr_number, stderr = %stderr, "github:pr view failed");
         return Err(anyhow!(
             "Failed to fetch PR #{}: {}",
             pr_number,

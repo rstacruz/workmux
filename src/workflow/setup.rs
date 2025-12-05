@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{cmd, config, git, prompt::Prompt, tmux};
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 
 use fs_extra::dir as fs_dir;
 use fs_extra::file as fs_file;
@@ -37,7 +37,8 @@ pub fn setup_environment(
         "setup_environment:start"
     );
     let prefix = config.window_prefix();
-    let repo_root = git::get_repo_root()?;
+    // Use main worktree root for file operations since source files live there
+    let repo_root = git::get_main_worktree_root()?;
 
     // Perform file operations (copy and symlink) if requested
     if options.run_file_ops {
@@ -184,6 +185,9 @@ pub fn handle_file_operations(
         )
     })?;
 
+    let mut copy_count = 0;
+    let mut symlink_count = 0;
+
     // Handle copies
     if let Some(copy_patterns) = &file_config.copy {
         for pattern in copy_patterns {
@@ -228,11 +232,6 @@ pub fn handle_file_operations(
                             source_path, dest_path
                         )
                     })?;
-                    trace!(
-                        from = %source_path.display(),
-                        to = %dest_path.display(),
-                        "file_operations:copied directory"
-                    );
                 } else {
                     // Copy single file
                     if let Some(parent) = dest_path.parent() {
@@ -245,12 +244,8 @@ pub fn handle_file_operations(
                     fs_file::copy(&source_path, &dest_path, &options).with_context(|| {
                         format!("Failed to copy file {:?} to {:?}", source_path, dest_path)
                     })?;
-                    trace!(
-                        from = %source_path.display(),
-                        to = %dest_path.display(),
-                        "file_operations:copied file"
-                    );
                 }
+                copy_count += 1;
             }
         }
     }
@@ -331,13 +326,17 @@ pub fn handle_file_operations(
                         )
                     })?;
                 }
-                trace!(
-                    from = %relative_source.display(),
-                    to = %dest_path.display(),
-                    "file_operations:symlinked"
-                );
+                symlink_count += 1;
             }
         }
+    }
+
+    if copy_count > 0 || symlink_count > 0 {
+        info!(
+            copied = copy_count,
+            symlinked = symlink_count,
+            "file_operations:completed"
+        );
     }
 
     Ok(())

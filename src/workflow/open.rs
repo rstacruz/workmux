@@ -7,14 +7,11 @@ use super::context::WorkflowContext;
 use super::setup;
 use super::types::{CreateResult, SetupOptions};
 
-/// Open a tmux window for an existing worktree
-pub fn open(
-    branch_name: &str,
-    context: &WorkflowContext,
-    options: SetupOptions,
-) -> Result<CreateResult> {
+/// Open a tmux window for an existing worktree.
+/// Accepts either a branch name or worktree directory name (basename).
+pub fn open(name: &str, context: &WorkflowContext, options: SetupOptions) -> Result<CreateResult> {
     info!(
-        branch = branch_name,
+        name = name,
         run_hooks = options.run_hooks,
         run_file_ops = options.run_file_ops,
         "open:start"
@@ -28,11 +25,11 @@ pub fn open(
     // Pre-flight checks
     context.ensure_tmux_running()?;
 
-    // This command requires the worktree to already exist
-    let worktree_path = git::get_worktree_path(branch_name).with_context(|| {
+    // Look up worktree by name (branch or directory basename)
+    let (worktree_path, branch_name) = git::get_worktree_by_name(name).with_context(|| {
         format!(
-            "No worktree found for branch '{}'. Use 'workmux add {}' to create it.",
-            branch_name, branch_name
+            "No worktree found for '{}'. Use 'workmux add {}' to create it.",
+            name, name
         )
     })?;
 
@@ -56,7 +53,7 @@ pub fn open(
 
     // Setup the environment
     let result = setup::setup_environment(
-        branch_name,
+        &branch_name,
         &handle,
         &worktree_path,
         &context.config,
