@@ -25,9 +25,9 @@ pub fn run(
         }
     }
 
-    // Resolve branch name from argument or current branch
+    // Resolve branch name from argument (supports worktree dir name) or current branch
     // Note: Must be done BEFORE creating WorkflowContext (which may change CWD)
-    let branch_to_merge = super::resolve_branch(branch_name, "merge")?;
+    let branch_to_merge = super::resolve_worktree_name(branch_name, "merge")?;
 
     let context = WorkflowContext::new(config)?;
 

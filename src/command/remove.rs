@@ -11,8 +11,8 @@ enum UserChoice {
 }
 
 pub fn run(branch_name: Option<&str>, force: bool, keep_branch: bool) -> Result<()> {
-    // Resolve branch name from argument or current branch
-    let branch_to_remove = super::resolve_branch(branch_name, "remove")?;
+    // Resolve branch name from argument (supports worktree dir name) or current branch
+    let branch_to_remove = super::resolve_worktree_name(branch_name, "remove")?;
 
     // Validate removal safety and get effective force flag
     let effective_force = match validate_removal_safety(&branch_to_remove, force, keep_branch)? {

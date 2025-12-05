@@ -40,12 +40,25 @@ pub fn announce_hooks(config: &Config, options: Option<&SetupOptions>, phase: Ho
     }
 }
 
-/// Resolve the branch name from CLI argument or current branch.
+/// Resolve a worktree name (branch or directory basename) to a branch name.
+/// Falls back to current branch if no argument provided.
 /// Note: Must be called BEFORE workflow operations that change CWD (like merge/remove).
-pub fn resolve_branch(arg: Option<&str>, operation: &str) -> Result<String> {
+pub fn resolve_worktree_name(arg: Option<&str>, operation: &str) -> Result<String> {
     match arg {
-        Some(name) => Ok(name.to_string()),
+        Some(name) => resolve_name_to_branch(name),
         None => git::get_current_branch()
             .with_context(|| format!("Failed to get current branch for {} operation", operation)),
     }
+}
+
+/// Resolve a worktree name (branch or directory basename) to a branch name.
+/// This helper is used by commands that take a required name parameter.
+pub fn resolve_name_to_branch(name: &str) -> Result<String> {
+    let (_path, branch) = git::get_worktree_by_name(name).with_context(|| {
+        format!(
+            "No worktree found for '{}'. Use 'workmux list' to see available worktrees.",
+            name
+        )
+    })?;
+    Ok(branch)
 }

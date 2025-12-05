@@ -277,13 +277,13 @@ alias wm='workmux'
 ## Commands
 
 - [`add`](#workmux-add-branch-name) - Create a new worktree and tmux window
-- [`merge`](#workmux-merge-branch-name) - Merge a branch and clean up everything
+- [`merge`](#workmux-merge-name) - Merge a branch and clean up everything
 - [`remove`](#workmux-remove-branch-name) - Remove a worktree without merging
 - [`list`](#workmux-list) - List all worktrees with status
 - [`init`](#workmux-init) - Generate configuration file
 - [`open`](#workmux-open-branch-name) - Open a tmux window for an existing
   worktree
-- [`path`](#workmux-path-branch-name) - Get the filesystem path of a worktree
+- [`path`](#workmux-path-name) - Get the filesystem path of a worktree
 - [`claude prune`](#workmux-claude-prune) - Clean up stale Claude Code entries
 - [`completions`](#workmux-completions-shell) - Generate shell completions
 
@@ -578,13 +578,14 @@ workmux add testing --prompt-file task.md
 
 ---
 
-### `workmux merge [branch-name]`
+### `workmux merge [name]`
 
 Merges a branch into a target branch (main by default) and automatically cleans
 up all associated resources (worktree, tmux window, and local branch).
 
-- `[branch-name]`: Optional name of the branch to merge. If omitted,
-  automatically detects the current branch from the worktree you're in.
+- `[name]`: Optional name of the worktree (can be either the branch name or the
+  worktree directory name). If omitted, automatically detects the current branch
+  from the worktree you're in.
 
 #### Options
 
@@ -772,19 +773,24 @@ workmux open user-auth --force-files
 
 ---
 
-### `workmux path <branch-name>`
+### `workmux path <name>`
 
 Prints the filesystem path of an existing worktree. Useful for scripting or
 quickly navigating to a worktree directory.
 
-- `<branch-name>`: Name of the branch that has an existing worktree.
+- `<name>`: Name of the worktree (can be either the branch name or the worktree
+  directory name).
 
 #### Examples
 
 ```bash
-# Get the path of a worktree
+# Get the path of a worktree by branch name
 workmux path user-auth
 # Output: /Users/you/project__worktrees/user-auth
+
+# Get the path by worktree directory name (if using custom names)
+workmux path ABC-123
+# Output: /Users/you/project__worktrees/ABC-123
 
 # Use in scripts or with cd
 cd "$(workmux path user-auth)"
